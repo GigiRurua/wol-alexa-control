@@ -11,14 +11,13 @@ from pystray import MenuItem as item
 import sys
 import winreg
 import pathlib
+import time
 
 BASE_DIR = pathlib.Path(sys.argv[0]).parent.absolute()
 SETTINGS_PATH = BASE_DIR / "agent_settings.json"
 
 def resource_path(relative_path):
-
     try:
-
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
@@ -35,15 +34,13 @@ class WolAgentApp(ctk.CTk):
 
         self.mac_address = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff) for ele in range(0,8*6,8)][::-1])
         self.app_name = "WOLCenterAgent"
-
+        
         self.title("WOL Center Agent")
         self.geometry("500x620")
-
+        
         try:
             self.icon_image = Image.open(ICON_PATH)
             self.icon_photo = ctk.CTkImage(light_image=self.icon_image, dark_image=self.icon_image, size=(32, 32))
-
-            from PIL import ImageTk
             self.wm_iconbitmap(resource_path("icon.ico"))
         except: pass
 
@@ -59,7 +56,6 @@ class WolAgentApp(ctk.CTk):
             self.withdraw_window()
 
     def setup_ui(self):
-
         self.header = ctk.CTkLabel(self, text="🛡️ WOL Secure Agent", font=ctk.CTkFont(size=24, weight="bold"))
         self.header.pack(pady=(30, 5))
 
@@ -93,7 +89,7 @@ class WolAgentApp(ctk.CTk):
         self.connect_btn = ctk.CTkButton(self, text="🚀 Connect & Save", command=self.restart_listener, font=ctk.CTkFont(weight="bold"), height=40)
         self.connect_btn.pack(pady=15)
 
-        self.status_label = ctk.CTkLabel(self, text="🔴 Offline", text_color="
+        self.status_label = ctk.CTkLabel(self, text="🔴 Offline", text_color="#ff4d4d", font=ctk.CTkFont(weight="bold"))
         self.status_label.pack()
 
         self.log_box = ctk.CTkTextbox(self, height=80, width=440)
@@ -110,17 +106,14 @@ class WolAgentApp(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     def toggle_startup(self, silent=False):
-
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if self.startup_var.get():
-
                 app_path = os.path.realpath(sys.argv[0])
                 winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, f'"{app_path}" --minimized')
                 if not silent: self.add_log("Startup enabled.")
             else:
-
                 try:
                     winreg.DeleteValue(key, self.app_name)
                     if not silent: self.add_log("Startup disabled.")
@@ -136,7 +129,6 @@ class WolAgentApp(ctk.CTk):
             os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
         elif "shutdown" in action:
             self.after(0, lambda: self.add_log("System Shutdown triggered..."))
-
             os.system("shutdown /s /f /t 0")
         elif "hibernate" in action:
             self.after(0, lambda: self.add_log("System Hibernation triggered..."))
@@ -147,47 +139,51 @@ class WolAgentApp(ctk.CTk):
 
     def start_listening(self, key, raw_mac, default_action):
         if not key or not raw_mac:
-            self.safe_update_status("🔴 Setup Incomplete", "
+            self.safe_update_status("🔴 Setup Incomplete", "#ff4d4d")
             return
 
         clean_mac = raw_mac.strip().replace(':', '').replace('-', '').replace(' ', '').lower()
         clean_key = key.strip()
-
         secret_hash = hashlib.sha256((clean_mac + clean_key).encode()).hexdigest()[:20]
         topic = f"wol_{secret_hash}"
         url = f"https://ntfy.sh/{topic}/json"
-
-        self.safe_update_status("🟢 Secure Listening Active", "
+        
+        self.safe_update_status("🟢 Secure Listening Active", "#00ff88")
         self.after(0, lambda: self.add_log(f"Topic generated: wol_{secret_hash[:5]}***"))
         self.after(0, lambda: self.add_log("Connecting to ntfy.sh..."))
 
+        session = requests.Session()
+        # Retry strategy for network failures
+        adapter = requests.adapters.HTTPAdapter(max_retries=requests.adapters.Retry(total=5, backoff_factor=1))
+        session.mount("https://", adapter)
+
         while self.is_running:
             try:
-
-                with requests.get(url, stream=True, timeout=60) as r:
+                # Use a smaller timeout to detect network drops (e.g., after Sleep)
+                with session.get(url, stream=True, timeout=45) as r:
                     for line in r.iter_lines():
                         if not self.is_running: break
                         if line:
                             data = json.loads(line)
                             if data.get("event") == "message":
                                 if data.get("message", "").lower() == "off":
-
                                     current_action = self.action_var.get()
                                     self.after(0, lambda: self.add_log(f"Command 'OFF' received! Action: {current_action}"))
                                     self.execute_action(current_action)
-            except Exception:
+            except (requests.exceptions.RequestException, Exception) as e:
                 if not self.is_running: break
-                self.safe_update_status("🟡 Reconnecting...", "
-                threading.Event().wait(10)
+                self.safe_update_status("🟡 Connection Lost - Retrying...", "#ffff00")
+                time.sleep(5) 
+                continue
 
     def restart_listener(self):
         self.is_running = False
         self.save_settings()
-
+        
         key = self.key_entry.get()
         mac = self.mac_entry.get()
         action = self.action_var.get()
-
+        
         self.is_running = True
         self.listen_thread = threading.Thread(
             target=self.start_listening, 
@@ -216,10 +212,10 @@ class WolAgentApp(ctk.CTk):
                     self.key_entry.insert(0, data.get("key", ""))
                     self.action_var.set(data.get("action", "Sleep"))
                     self.startup_var.set(data.get("startup", False))
-
+                    
                     if data.get("startup", False):
                         self.after(1000, lambda: self.toggle_startup(silent=True))
-
+                        
                     if data.get("key"): self.restart_listener()
             except: pass
 
@@ -229,7 +225,7 @@ class WolAgentApp(ctk.CTk):
             image = Image.open(ICON_PATH)
         except:
             image = Image.new('RGB', (64, 64), color=(0, 242, 255))
-
+            
         self.tray_icon = pystray.Icon("WOLAgent", image, "WOL Agent", (
             item('Show', self.show_window, default=True), 
             item('Exit', self.exit_app)
@@ -244,12 +240,10 @@ class WolAgentApp(ctk.CTk):
         self.is_running = False
         if hasattr(self, 'tray_icon'): 
             self.tray_icon.stop()
-
         self.after(0, self._final_exit)
 
     def _final_exit(self):
         self.destroy()
-
         os._exit(0)
 
 if __name__ == "__main__":
