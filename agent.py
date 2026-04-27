@@ -34,6 +34,7 @@ class WolAgentApp(ctk.CTk):
 
         self.mac_address = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff) for ele in range(0,8*6,8)][::-1])
         self.app_name = "WOLCenterAgent"
+        self.last_msg_id = None # Store last processed message ID
         
         self.title("WOL Center Agent")
         self.geometry("500x620")
@@ -148,31 +149,33 @@ class WolAgentApp(ctk.CTk):
         topic = f"wol_{secret_hash}"
         url = f"https://ntfy.sh/{topic}/json"
         
-        self.safe_update_status("🟢 Secure Listening Active", "#00ff88")
-        self.after(0, lambda: self.add_log(f"Topic generated: wol_{secret_hash[:5]}***"))
-        self.after(0, lambda: self.add_log("Connecting to ntfy.sh..."))
-
-        session = requests.Session()
-        # Retry strategy for network failures
-        adapter = requests.adapters.HTTPAdapter(max_retries=requests.adapters.Retry(total=5, backoff_factor=1))
-        session.mount("https://", adapter)
-
         while self.is_running:
             try:
-                # Use a smaller timeout to detect network drops (e.g., after Sleep)
+                session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(max_retries=requests.adapters.Retry(total=3, backoff_factor=1))
+                session.mount("https://", adapter)
+                
+                self.safe_update_status("🟢 Secure Listening Active", "#00ff88")
+                
                 with session.get(url, stream=True, timeout=45) as r:
                     for line in r.iter_lines():
                         if not self.is_running: break
                         if line:
                             data = json.loads(line)
                             if data.get("event") == "message":
+                                msg_id = data.get("id")
                                 if data.get("message", "").lower() == "off":
-                                    current_action = self.action_var.get()
-                                    self.after(0, lambda: self.add_log(f"Command 'OFF' received! Action: {current_action}"))
-                                    self.execute_action(current_action)
-            except (requests.exceptions.RequestException, Exception) as e:
+                                    # Dedup: only process if it's a new message ID
+                                    if msg_id and msg_id != self.last_msg_id:
+                                        self.last_msg_id = msg_id
+                                        current_action = self.action_var.get()
+                                        self.after(0, lambda: self.add_log(f"Command 'OFF' received! Action: {current_action}"))
+                                        self.execute_action(current_action)
+            except Exception as e:
                 if not self.is_running: break
                 self.safe_update_status("🟡 Connection Lost - Retrying...", "#ffff00")
+                err_msg = str(e)[:50]
+                self.after(0, lambda: self.add_log(f"Connection issue: {err_msg}..."))
                 time.sleep(5) 
                 continue
 
