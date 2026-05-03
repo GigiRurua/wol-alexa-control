@@ -13,6 +13,8 @@ export default async function handler(req, res) {
   const namespace = request.directive.header.namespace;
   const name = request.directive.header.name;
 
+  console.log(`Incoming: ${namespace} / ${name}`);
+
   if (namespace === 'Alexa.Discovery' && name === 'Discover') {
     return handleDiscovery(request, res);
   }
@@ -21,6 +23,13 @@ export default async function handler(req, res) {
     return handlePowerControl(request, res);
   }
 
+  // Alexa sends this before TurnOn to check if the device is reachable.
+  // We always return OK so Alexa never blocks the command.
+  if (namespace === 'Alexa' && name === 'ReportState') {
+    return handleReportState(request, res);
+  }
+
+  // Catch-all
   return res.status(200).json({
     event: {
       header: {
@@ -34,20 +43,21 @@ export default async function handler(req, res) {
   });
 }
 
+// ── Discovery ──────────────────────────────────────────────────────────────
+
 async function handleDiscovery(request, res) {
   try {
     const messageId = request.directive.header.messageId;
     const devices = await redis.get('wol_devices') || [];
 
+    const formatMac = (rawMac) => {
+      const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+      if (clean.length !== 12) return clean;
+      return clean.match(/.{1,2}/g).join(':');
+    };
+
     const endpoints = devices.map(config => {
-
       const cleanId = config.mac.replace(/[: -]/g, '').toLowerCase();
-
-      const formatMac = (rawMac) => {
-        const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
-        if (clean.length !== 12) return clean;
-        return clean.match(/.{1,2}/g).join(':');
-      };
 
       return {
         endpointId: "endpoint-" + cleanId,
@@ -63,6 +73,7 @@ async function handleDiscovery(request, res) {
             properties: {
               supported: [{ name: "powerState" }],
               proactivelyReported: false,
+              // false = Alexa won't poll for state, preventing offline checks
               retrievable: false
             }
           },
@@ -91,9 +102,7 @@ async function handleDiscovery(request, res) {
           messageId: messageId + "-R",
           payloadVersion: "3"
         },
-        payload: {
-          endpoints: endpoints
-        }
+        payload: { endpoints }
       }
     });
   } catch (err) {
@@ -101,6 +110,48 @@ async function handleDiscovery(request, res) {
     return res.status(500).json({ error: "Internal Error" });
   }
 }
+
+// ── ReportState ────────────────────────────────────────────────────────────
+// Always report the device as reachable and OFF.
+// This prevents Alexa from blocking TurnOn with "device unresponsive."
+
+async function handleReportState(request, res) {
+  const { header, endpoint } = request.directive;
+
+  return res.status(200).json({
+    context: {
+      properties: [
+        {
+          namespace: "Alexa.PowerController",
+          name: "powerState",
+          value: "OFF",
+          timeOfSample: new Date().toISOString(),
+          uncertaintyInMilliseconds: 0
+        },
+        {
+          namespace: "Alexa.EndpointHealth",
+          name: "connectivity",
+          value: { value: "OK" },
+          timeOfSample: new Date().toISOString(),
+          uncertaintyInMilliseconds: 0
+        }
+      ]
+    },
+    event: {
+      header: {
+        namespace: "Alexa",
+        name: "StateReport",
+        messageId: header.messageId + "-R",
+        correlationToken: header.correlationToken,
+        payloadVersion: "3"
+      },
+      endpoint: { endpointId: endpoint.endpointId },
+      payload: {}
+    }
+  });
+}
+
+// ── Power Control ──────────────────────────────────────────────────────────
 
 async function handlePowerControl(request, res) {
   const { header, endpoint } = request.directive;
@@ -112,15 +163,25 @@ async function handlePowerControl(request, res) {
   console.log(`Power Control: ${name} for ${endpointId}`);
 
   if (name === 'TurnOn') {
+    // Tell Alexa to send the magic packet from the Echo device itself.
     return res.status(200).json({
       context: {
-        properties: [{
-          namespace: "Alexa.PowerController",
-          name: "powerState",
-          value: "OFF",
-          timeOfSample: new Date().toISOString(),
-          uncertaintyInMilliseconds: 500
-        }]
+        properties: [
+          {
+            namespace: "Alexa.PowerController",
+            name: "powerState",
+            value: "OFF",
+            timeOfSample: new Date().toISOString(),
+            uncertaintyInMilliseconds: 500
+          },
+          {
+            namespace: "Alexa.EndpointHealth",
+            name: "connectivity",
+            value: { value: "OK" },
+            timeOfSample: new Date().toISOString(),
+            uncertaintyInMilliseconds: 500
+          }
+        ]
       },
       event: {
         header: {
@@ -152,7 +213,7 @@ async function handlePowerControl(request, res) {
         method: 'POST',
         body: 'off'
       });
-      console.log(`Sent secure shutdown command to topic: ${topic}`);
+      console.log(`Sent shutdown command to topic: ${topic}`);
     } catch (err) {
       console.error("Error sending to ntfy:", err);
     }
@@ -167,9 +228,7 @@ async function handlePowerControl(request, res) {
         correlationToken: correlationToken,
         payloadVersion: "3"
       },
-      endpoint: {
-        endpointId: endpointId
-      },
+      endpoint: { endpointId: endpointId },
       payload: {}
     },
     context: {
@@ -184,9 +243,7 @@ async function handlePowerControl(request, res) {
         {
           namespace: "Alexa.EndpointHealth",
           name: "connectivity",
-          value: {
-            value: "OK"
-          },
+          value: { value: "OK" },
           timeOfSample: new Date().toISOString(),
           uncertaintyInMilliseconds: 0
         }
