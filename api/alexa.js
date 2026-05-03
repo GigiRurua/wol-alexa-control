@@ -163,39 +163,29 @@ async function handlePowerControl(request, res) {
   console.log(`Power Control: ${name} for ${endpointId}`);
 
   if (name === 'TurnOn') {
-    // Tell Alexa to send the magic packet from the Echo device itself.
-    return res.status(200).json({
-      context: {
-        properties: [
-          {
-            namespace: "Alexa.PowerController",
-            name: "powerState",
-            value: "OFF",
-            timeOfSample: new Date().toISOString(),
-            uncertaintyInMilliseconds: 500
-          },
-          {
-            namespace: "Alexa.EndpointHealth",
-            name: "connectivity",
-            value: { value: "OK" },
-            timeOfSample: new Date().toISOString(),
-            uncertaintyInMilliseconds: 500
-          }
-        ]
+  return res.status(200).json({
+    event: {
+      header: {
+        namespace: "Alexa",
+        name: "Response",
+        messageId: messageId + "-R",
+        correlationToken: correlationToken,
+        payloadVersion: "3"
       },
-      event: {
-        header: {
-          namespace: "Alexa.WakeOnLANController",
-          name: "WakeUp",
-          payloadVersion: "3",
-          messageId: messageId + "-R",
-          correlationToken: correlationToken
-        },
-        endpoint: { endpointId: endpointId },
-        payload: {}
-      }
-    });
-  }
+      endpoint: { endpointId: endpointId },
+      payload: {}
+    },
+    context: {
+      properties: [{
+        namespace: "Alexa.PowerController",
+        name: "powerState",
+        value: "ON",
+        timeOfSample: new Date().toISOString(),
+        uncertaintyInMilliseconds: 0
+      }]
+    }
+  });
+}
 
   if (name === 'TurnOff') {
     const cleanId = endpointId.replace('endpoint-', '');
