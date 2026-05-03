@@ -45,7 +45,7 @@ async function handleDiscovery(request, res) {
 
       const formatMac = (rawMac) => {
         const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
-        if (clean.length !== 12) return clean; 
+        if (clean.length !== 12) return clean;
         return clean.match(/.{1,2}/g).join(':');
       };
 
@@ -116,13 +116,37 @@ async function handlePowerControl(request, res) {
   const { header, endpoint } = request.directive;
   const correlationToken = header.correlationToken;
   const messageId = header.messageId;
-  const endpointId = endpoint.endpointId; 
-  const name = header.name; 
+  const endpointId = endpoint.endpointId;
+  const name = header.name;
 
   console.log(`Power Control: ${name} for ${endpointId}`);
 
-  if (name === 'TurnOff') {
+  if (name === 'TurnOn') {
+    return res.status(200).json({
+      context: {
+        properties: [{
+          namespace: "Alexa.PowerController",
+          name: "powerState",
+          value: "OFF",
+          timeOfSample: new Date().toISOString(),
+          uncertaintyInMilliseconds: 500
+        }]
+      },
+      event: {
+        header: {
+          namespace: "Alexa.WakeOnLANController",
+          name: "WakeUp",
+          payloadVersion: "3",
+          messageId: messageId + "-R",
+          correlationToken: correlationToken
+        },
+        endpoint: { endpointId: endpointId },
+        payload: {}
+      }
+    });
+  }
 
+  if (name === 'TurnOff') {
     const cleanId = endpointId.replace('endpoint-', '');
     const adminPassword = process.env.ADMIN_PASSWORD || "";
 
@@ -134,7 +158,6 @@ async function handlePowerControl(request, res) {
     const topic = `wol_${secretHash}`;
 
     try {
-
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
         body: 'off'
@@ -164,7 +187,7 @@ async function handlePowerControl(request, res) {
         {
           namespace: "Alexa.PowerController",
           name: "powerState",
-          value: name === "TurnOn" ? "ON" : "OFF",
+          value: "OFF",
           timeOfSample: new Date().toISOString(),
           uncertaintyInMilliseconds: 0
         },
