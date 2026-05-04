@@ -23,13 +23,10 @@ export default async function handler(req, res) {
     return handlePowerControl(request, res);
   }
 
-  // Alexa sends this before TurnOn to check if the device is reachable.
-  // We always return OK so Alexa never blocks the command.
   if (namespace === 'Alexa' && name === 'ReportState') {
     return handleReportState(request, res);
   }
 
-  // Catch-all
   return res.status(200).json({
     event: {
       header: {
@@ -65,24 +62,37 @@ async function handleDiscovery(request, res) {
         friendlyName: config.name,
         description: `PC WoL: ${config.name}`,
         displayCategories: ["COMPUTER"],
+        cookie: {},
         capabilities: [
+          {
+            // Docs require empty properties: {} explicitly
+            type: "AlexaInterface",
+            interface: "Alexa.WakeOnLANController",
+            version: "3",
+            properties: {},
+            configuration: {
+              MACAddresses: [formatMac(config.mac)]
+            }
+          },
           {
             type: "AlexaInterface",
             interface: "Alexa.PowerController",
             version: "3",
             properties: {
               supported: [{ name: "powerState" }],
-              proactivelyReported: false,
-              // false = Alexa won't poll for state, preventing offline checks
-              retrievable: false
+              proactivelyReported: true,
+              retrievable: true
             }
           },
           {
+            // Required by docs for WakeOnLANController to work properly
             type: "AlexaInterface",
-            interface: "Alexa.WakeOnLANController",
+            interface: "Alexa.EndpointHealth",
             version: "3",
-            configuration: {
-              MACAddresses: [formatMac(config.mac)]
+            properties: {
+              supported: [{ name: "connectivity" }],
+              proactivelyReported: true,
+              retrievable: true
             }
           },
           {
@@ -112,8 +122,6 @@ async function handleDiscovery(request, res) {
 }
 
 // ── ReportState ────────────────────────────────────────────────────────────
-// Always report the device as reachable and OFF.
-// This prevents Alexa from blocking TurnOn with "device unresponsive."
 
 async function handleReportState(request, res) {
   const { header, endpoint } = request.directive;
@@ -163,29 +171,24 @@ async function handlePowerControl(request, res) {
   console.log(`Power Control: ${name} for ${endpointId}`);
 
   if (name === 'TurnOn') {
-  return res.status(200).json({
-    event: {
-      header: {
-        namespace: "Alexa",
-        name: "Response",
-        messageId: messageId + "-R",
-        correlationToken: correlationToken,
-        payloadVersion: "3"
-      },
-      endpoint: { endpointId: endpointId },
-      payload: {}
-    },
-    context: {
-      properties: [{
-        namespace: "Alexa.PowerController",
-        name: "powerState",
-        value: "ON",
-        timeOfSample: new Date().toISOString(),
-        uncertaintyInMilliseconds: 0
-      }]
-    }
-  });
-}
+    // Step 1: Send DeferredResponse immediately as docs require
+    // Then Alexa will send the magic packet from Echo using the MAC
+    // registered in discovery, and we confirm with a Response.
+    return res.status(200).json({
+      event: {
+        header: {
+          namespace: "Alexa",
+          name: "DeferredResponse",
+          messageId: messageId + "-R",
+          correlationToken: correlationToken,
+          payloadVersion: "3"
+        },
+        payload: {
+          estimatedDeferralInSeconds: 15
+        }
+      }
+    });
+  }
 
   if (name === 'TurnOff') {
     const cleanId = endpointId.replace('endpoint-', '');
