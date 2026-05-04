@@ -53,7 +53,7 @@ async function handleDiscovery(request, res) {
     const formatMac = (rawMac) => {
       const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
       if (clean.length !== 12) return clean;
-      return clean.match(/.{1,2}/g).join(':');
+      return clean.match(/.{1,2}/g).join('-');
     };
 
     const endpoints = devices.map(config => {
