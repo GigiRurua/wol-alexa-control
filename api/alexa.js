@@ -61,7 +61,7 @@ async function handleDiscovery(request, res) {
 
       return {
         endpointId: "endpoint-" + cleanId,
-        manufacturerName: "FlowersPowerz",
+        manufacturerName: "FeloniousGR",
         friendlyName: config.name,
         description: `PC WoL: ${config.name}`,
         displayCategories: ["COMPUTER"],
