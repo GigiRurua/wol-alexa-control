@@ -13,22 +13,12 @@ export default async function handler(req, res) {
   const namespace = request.directive.header.namespace;
   const name = request.directive.header.name;
 
-  console.log(`Incoming: ${namespace} / ${name}`);
-
   if (namespace === 'Alexa.Discovery' && name === 'Discover') {
     return handleDiscovery(request, res);
   }
 
-  if (namespace === 'Alexa.Authorization' && name === 'AcceptGrant') {
-    return handleAcceptGrant(request, res);
-  }
-
   if (namespace === 'Alexa.PowerController') {
     return handlePowerControl(request, res);
-  }
-
-  if (namespace === 'Alexa' && name === 'ReportState') {
-    return handleReportState(request, res);
   }
 
   return res.status(200).json({
@@ -44,39 +34,20 @@ export default async function handler(req, res) {
   });
 }
 
-// ── AcceptGrant ──────────────────────────────────────────────────────────────
-
-async function handleAcceptGrant(request, res) {
-  const messageId = request.directive.header.messageId;
-  console.log(`AcceptGrant received.`);
-  return res.status(200).json({
-    event: {
-      header: {
-        namespace: "Alexa.Authorization",
-        name: "AcceptGrant.Response",
-        messageId: messageId + "-R",
-        payloadVersion: "3"
-      },
-      payload: {}
-    }
-  });
-}
-
-// ── Discovery ────────────────────────────────────────────────────────────────
-
 async function handleDiscovery(request, res) {
   try {
     const messageId = request.directive.header.messageId;
     const devices = await redis.get('wol_devices') || [];
 
-    const formatMac = (rawMac) => {
-      const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
-      if (clean.length !== 12) return clean;
-      return clean.match(/.{1,2}/g).join(':');
-    };
-
     const endpoints = devices.map(config => {
+
       const cleanId = config.mac.replace(/[: -]/g, '').toLowerCase();
+
+      const formatMac = (rawMac) => {
+        const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+        if (clean.length !== 12) return clean; 
+        return clean.match(/.{1,2}/g).join(':');
+      };
 
       return {
         endpointId: "endpoint-" + cleanId,
@@ -84,24 +55,14 @@ async function handleDiscovery(request, res) {
         friendlyName: config.name,
         description: `PC WoL: ${config.name}`,
         displayCategories: ["COMPUTER"],
-        cookie: {},
         capabilities: [
-          {
-            type: "AlexaInterface",
-            interface: "Alexa.WakeOnLANController",
-            version: "3",
-            properties: {},
-            configuration: {
-              MACAddresses: [formatMac(config.mac)]
-            }
-          },
           {
             type: "AlexaInterface",
             interface: "Alexa.PowerController",
             version: "3",
             properties: {
               supported: [{ name: "powerState" }],
-              proactivelyReported: true,
+              proactivelyReported: false,
               retrievable: true
             }
           },
@@ -111,8 +72,16 @@ async function handleDiscovery(request, res) {
             version: "3",
             properties: {
               supported: [{ name: "connectivity" }],
-              proactivelyReported: true,
+              proactivelyReported: false,
               retrievable: true
+            }
+          },
+          {
+            type: "AlexaInterface",
+            interface: "Alexa.WakeOnLANController",
+            version: "3",
+            configuration: {
+              MACAddresses: [formatMac(config.mac)]
             }
           },
           {
@@ -132,7 +101,9 @@ async function handleDiscovery(request, res) {
           messageId: messageId + "-R",
           payloadVersion: "3"
         },
-        payload: { endpoints }
+        payload: {
+          endpoints: endpoints
+        }
       }
     });
   } catch (err) {
@@ -141,56 +112,17 @@ async function handleDiscovery(request, res) {
   }
 }
 
-// ── ReportState ──────────────────────────────────────────────────────────────
-
-async function handleReportState(request, res) {
-  const { header, endpoint } = request.directive;
-
-  return res.status(200).json({
-    context: {
-      properties: [
-        {
-          namespace: "Alexa.PowerController",
-          name: "powerState",
-          value: "OFF",
-          timeOfSample: new Date().toISOString(),
-          uncertaintyInMilliseconds: 0
-        },
-        {
-          namespace: "Alexa.EndpointHealth",
-          name: "connectivity",
-          value: { value: "OK" },
-          timeOfSample: new Date().toISOString(),
-          uncertaintyInMilliseconds: 0
-        }
-      ]
-    },
-    event: {
-      header: {
-        namespace: "Alexa",
-        name: "StateReport",
-        messageId: header.messageId + "-R",
-        correlationToken: header.correlationToken,
-        payloadVersion: "3"
-      },
-      endpoint: { endpointId: endpoint.endpointId },
-      payload: {}
-    }
-  });
-}
-
-// ── Power Control ────────────────────────────────────────────────────────────
-
 async function handlePowerControl(request, res) {
   const { header, endpoint } = request.directive;
   const correlationToken = header.correlationToken;
   const messageId = header.messageId;
-  const endpointId = endpoint.endpointId;
-  const name = header.name;
+  const endpointId = endpoint.endpointId; 
+  const name = header.name; 
 
   console.log(`Power Control: ${name} for ${endpointId}`);
 
   if (name === 'TurnOff') {
+
     const cleanId = endpointId.replace('endpoint-', '');
     const adminPassword = process.env.ADMIN_PASSWORD || "";
 
@@ -202,18 +134,17 @@ async function handlePowerControl(request, res) {
     const topic = `wol_${secretHash}`;
 
     try {
+
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
         body: 'off'
       });
-      console.log(`Sent shutdown command to topic: ${topic}`);
+      console.log(`Sent secure shutdown command to topic: ${topic}`);
     } catch (err) {
       console.error("Error sending to ntfy:", err);
     }
   }
 
-  // For TurnOn: return plain Response and let Alexa's WakeOnLANController
-  // handle sending the magic packet from the Echo automatically.
   return res.status(200).json({
     event: {
       header: {
@@ -223,7 +154,9 @@ async function handlePowerControl(request, res) {
         correlationToken: correlationToken,
         payloadVersion: "3"
       },
-      endpoint: { endpointId: endpointId },
+      endpoint: {
+        endpointId: endpointId
+      },
       payload: {}
     },
     context: {
@@ -238,7 +171,9 @@ async function handlePowerControl(request, res) {
         {
           namespace: "Alexa.EndpointHealth",
           name: "connectivity",
-          value: { value: "OK" },
+          value: {
+            value: "OK"
+          },
           timeOfSample: new Date().toISOString(),
           uncertaintyInMilliseconds: 0
         }
