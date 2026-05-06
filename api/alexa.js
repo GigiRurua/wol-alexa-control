@@ -6,6 +6,10 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 })
 
+// Alexa event gateway endpoint (North America)
+const ALEXA_EVENT_GATEWAY = 'https://api.amazonalexa.com/v3/events';
+const LWA_TOKEN_URL = 'https://api.amazon.com/auth/o2/token';
+
 export default async function handler(req, res) {
   const request = req.body;
   if (!request || !request.directive) return res.status(400).end();
@@ -44,22 +48,112 @@ export default async function handler(req, res) {
   });
 }
 
-// ── AcceptGrant ──────────────────────────────────────────────────────────────
+// ── AcceptGrant ─────────────────────────────────────────────────────────────
+// Alexa sends this when the skill is enabled.
+// We exchange the auth code for real access/refresh tokens and store them.
 
 async function handleAcceptGrant(request, res) {
   const messageId = request.directive.header.messageId;
-  console.log(`AcceptGrant received.`);
-  return res.status(200).json({
-    event: {
-      header: {
-        namespace: "Alexa.Authorization",
-        name: "AcceptGrant.Response",
-        messageId: messageId + "-R",
-        payloadVersion: "3"
-      },
-      payload: {}
+  const code = request.directive.payload.grant.code;
+
+  console.log(`AcceptGrant received, exchanging code for tokens...`);
+
+  try {
+    const params = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      client_id: process.env.ALEXA_CLIENT_ID,
+      client_secret: process.env.ALEXA_CLIENT_SECRET,
+    });
+
+    const tokenRes = await fetch(LWA_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+
+    const tokens = await tokenRes.json();
+    console.log(`Token exchange status: ${tokenRes.status}`);
+
+    if (!tokens.access_token) {
+      throw new Error(`No access token returned: ${JSON.stringify(tokens)}`);
     }
-  });
+
+    // Store tokens in Redis with expiry info
+    await redis.set('alexa_tokens', {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: Date.now() + (tokens.expires_in * 1000),
+    });
+
+    console.log(`Tokens stored successfully.`);
+
+    return res.status(200).json({
+      event: {
+        header: {
+          namespace: "Alexa.Authorization",
+          name: "AcceptGrant.Response",
+          messageId: messageId + "-R",
+          payloadVersion: "3"
+        },
+        payload: {}
+      }
+    });
+  } catch (err) {
+    console.error("AcceptGrant Error:", err);
+    return res.status(200).json({
+      event: {
+        header: {
+          namespace: "Alexa.Authorization",
+          name: "ErrorResponse",
+          messageId: messageId + "-R",
+          payloadVersion: "3"
+        },
+        payload: {
+          type: "ACCEPT_GRANT_FAILED",
+          message: err.message
+        }
+      }
+    });
+  }
+}
+
+// ── Get valid access token ───────────────────────────────────────────────────
+// Returns a valid access token, refreshing if expired.
+
+async function getAccessToken() {
+  const stored = await redis.get('alexa_tokens');
+  if (!stored) throw new Error('No Alexa tokens stored. Disable and re-enable the skill.');
+
+  // Refresh if expired or expiring within 5 minutes
+  if (Date.now() > stored.expires_at - 300000) {
+    console.log('Access token expired, refreshing...');
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: stored.refresh_token,
+      client_id: process.env.ALEXA_CLIENT_ID,
+      client_secret: process.env.ALEXA_CLIENT_SECRET,
+    });
+
+    const tokenRes = await fetch(LWA_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+
+    const tokens = await tokenRes.json();
+    if (!tokens.access_token) throw new Error('Token refresh failed');
+
+    const newStored = {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: Date.now() + (tokens.expires_in * 1000),
+    };
+    await redis.set('alexa_tokens', newStored);
+    return tokens.access_token;
+  }
+
+  return stored.access_token;
 }
 
 // ── Discovery ────────────────────────────────────────────────────────────────
@@ -70,9 +164,9 @@ async function handleDiscovery(request, res) {
     const devices = await redis.get('wol_devices') || [];
 
     const formatMac = (rawMac) => {
-      const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+      const clean = rawMac.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
       if (clean.length !== 12) return clean;
-      return clean.match(/.{1,2}/g).join(':');
+      return clean.match(/.{1,2}/g).join('-');
     };
 
     const endpoints = devices.map(config => {
@@ -190,6 +284,93 @@ async function handlePowerControl(request, res) {
 
   console.log(`Power Control: ${name} for ${endpointId}`);
 
+  if (name === 'TurnOn') {
+    try {
+      const accessToken = await getAccessToken();
+
+      const wakeUpEvent = {
+        context: {
+          properties: [{
+            namespace: "Alexa.PowerController",
+            name: "powerState",
+            value: "OFF",
+            timeOfSample: new Date().toISOString(),
+            uncertaintyInMilliseconds: 500
+          }]
+        },
+        event: {
+          header: {
+            namespace: "Alexa.WakeOnLANController",
+            name: "WakeUp",
+            messageId: crypto.randomUUID(),
+            correlationToken: correlationToken,
+            payloadVersion: "3"
+          },
+          endpoint: {
+            scope: {
+              type: "BearerToken",
+              token: accessToken
+            },
+            endpointId: endpointId
+          },
+          payload: {}
+        }
+      };
+
+      const gatewayRes = await fetch(ALEXA_EVENT_GATEWAY, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(wakeUpEvent)
+      });
+
+      console.log(`WakeUp event sent to gateway, status: ${gatewayRes.status}`);
+
+      return res.status(200).json({
+        event: {
+          header: {
+            namespace: "Alexa",
+            name: "Response",
+            messageId: messageId + "-R",
+            correlationToken: correlationToken,
+            payloadVersion: "3"
+          },
+          endpoint: { endpointId: endpointId },
+          payload: {}
+        },
+        context: {
+          properties: [{
+            namespace: "Alexa.PowerController",
+            name: "powerState",
+            value: "ON",
+            timeOfSample: new Date().toISOString(),
+            uncertaintyInMilliseconds: 500
+          }]
+        }
+      });
+    } catch (err) {
+      console.error("TurnOn Error:", err);
+      return res.status(200).json({
+        event: {
+          header: {
+            namespace: "Alexa",
+            name: "ErrorResponse",
+            messageId: messageId + "-R",
+            correlationToken: correlationToken,
+            payloadVersion: "3"
+          },
+          endpoint: { endpointId: endpointId },
+          payload: {
+            type: "INTERNAL_ERROR",
+            message: err.message
+          }
+        }
+      });
+    }
+  }
+
   if (name === 'TurnOff') {
     const cleanId = endpointId.replace('endpoint-', '');
     const adminPassword = process.env.ADMIN_PASSWORD || "";
@@ -212,8 +393,6 @@ async function handlePowerControl(request, res) {
     }
   }
 
-  // For TurnOn: return plain Response and let Alexa's WakeOnLANController
-  // handle sending the magic packet from the Echo automatically.
   return res.status(200).json({
     event: {
       header: {
@@ -231,7 +410,7 @@ async function handlePowerControl(request, res) {
         {
           namespace: "Alexa.PowerController",
           name: "powerState",
-          value: name === "TurnOn" ? "ON" : "OFF",
+          value: "OFF",
           timeOfSample: new Date().toISOString(),
           uncertaintyInMilliseconds: 0
         },
